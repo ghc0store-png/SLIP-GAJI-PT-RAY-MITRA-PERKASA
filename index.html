@@ -731,7 +731,8 @@
         <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;">
           <h2 style="margin:2px 0 14px;">Arsip Bulanan</h2>
           <div style="display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end;">
-            <button class="btn-danger btn-small" id="btnClearMonth" title="Hapus seluruh data karyawan pada bulan yang sedang dipilih">🗑️ Hapus Semua</button>
+            <button class="btn-danger btn-small" id="btnClearMonth" title="Hapus data dan folder bulan yang sedang dipilih">🗑️ Hapus Bulan</button>
+            <button class="btn-danger btn-small" id="btnClearAllHistory" title="Hapus semua riwayat dan semua folder arsip">🗑️ Hapus ALL & Folder</button>
             <button class="btn-gold btn-small" id="btnAddMonth">+ Tambah Bulan</button>
           </div>
         </div>
@@ -1022,8 +1023,8 @@
     }catch(e){ monthRecords = {}; }
 
     // Bersihkan arsip tahun lama yang tersimpan dari versi sebelumnya.
-    // Sistem periode aktif PT Ray Mitra Perkasa sekarang hanya 2026.
-    // Arsip tahun mengikuti nama tab Google Sheets; jangan menghapus tahun lain seperti 2025.
+    // Arsip tahun dan bulan mengikuti nama tab Google Sheets.
+    // Tidak ada tahun yang dipaksakan; misalnya DESEMBER 2025 tetap DESEMBER 2025.
 
     // Migrasi otomatis data versi lama menjadi arsip AGUSTUS 2026/periode lama.
     if(!Object.keys(monthRecords).length){
@@ -1128,6 +1129,59 @@
     }catch(err){
       console.error('Gagal menghapus bulan:', err);
       toast('Gagal menghapus bulan. Silakan coba lagi.');
+    }
+  }
+
+  async function clearAllHistory(){
+    const keys = Object.keys(monthRecords || {});
+    const totalSlips = keys.reduce((sum, k) => {
+      const rec = monthRecords[k];
+      return sum + (Array.isArray(rec && rec.employees) ? rec.employees.length : 0);
+    }, 0);
+
+    const first = confirm(
+      'HAPUS ALL + SEMUA FOLDER ARSIP\n\n' +
+      'Folder/periode tersimpan: ' + keys.length + '\n' +
+      'Total slip tersimpan: ' + totalSlips + '\n\n' +
+      'SEMUA riwayat, semua data slip, dan SEMUA folder arsip bulan akan dihapus permanen.\n' +
+      'Daftar LINK REKAP GAJI tetap dipertahankan agar Anda tidak perlu memasukkan link lagi.\n\n' +
+      'Lanjutkan?'
+    );
+    if(!first) return;
+
+    const second = prompt('Ketik HAPUS ALL untuk menghapus SEMUA riwayat dan SEMUA folder:');
+    if(String(second || '').trim().toUpperCase() !== 'HAPUS ALL'){
+      toast('Penghapusan ALL dibatalkan');
+      return;
+    }
+
+    try{
+      // Hapus seluruh arsip/folder bulan sekaligus, bukan satu per satu.
+      monthRecords = {};
+      activeMonthKey = '';
+      employees = [];
+      currentId = null;
+      wilayahFilter = '__all__';
+      employeeSearch = '';
+      if($('employeeSearch')) $('employeeSearch').value = '';
+
+      // Bersihkan data legacy yang dapat membuat riwayat lama muncul kembali.
+      await storageSet(MONTHS_STORAGE_KEY, JSON.stringify({}));
+      await storageSet(STORAGE_KEY, JSON.stringify([]));
+      await storageSet(ACTIVE_MONTH_STORAGE_KEY, '');
+
+      // Link sumber Rekap Gaji sengaja TIDAK dihapus.
+      await saveSources();
+      setSaveStatus(true);
+
+      if($('globalPeriode')) $('globalPeriode').value = '';
+      if($('monthSelect')) $('monthSelect').value = '';
+      renderAll();
+      renderMonthSelector();
+      toast('SEMUA riwayat dan folder arsip berhasil dihapus');
+    }catch(err){
+      console.error('Gagal menghapus semua riwayat:', err);
+      toast('Gagal menghapus semua riwayat. Silakan coba lagi.');
     }
   }
 
@@ -2317,6 +2371,7 @@ function headerScore(row){
 
   $('btnAddMonth').addEventListener('click', addMonth);
   $('btnClearMonth').addEventListener('click', clearActiveMonth);
+  $('btnClearAllHistory').addEventListener('click', clearAllHistory);
   $('monthSelect').addEventListener('change', () => switchMonth($('monthSelect').value));
 
   $('btnAddEmp').addEventListener('click', () => openModal(null));
