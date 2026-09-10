@@ -1653,10 +1653,10 @@
   }
 
   const HEADER_ALIASES = {
-    nama:['NAMA'],
-    jabatan:['JABATAN','DEPARTMENT','DEPARTEMENT','POSISI'],
-    gajiPokok:['GAJI POKOK','GAJI'],
-    hariKerja:['JUMLAH HARI KERJA','HARI KERJA','JUMLAH HARI','HARI KERJA EFEKTIF'],
+    nama:['NAMA','NAMA PEGAWAI','NAMA KARYAWAN','PEGAWAI'],
+    jabatan:['JABATAN','DEPARTMENT','DEPARTEMENT','POSISI','DEPARTEMEN','BAGIAN'],
+    gajiPokok:['GAJI POKOK','GAJI POKOK PEGAWAI','GAJI'],
+    hariKerja:['JUMLAH HARI KERJA','JUMLAH HARI KERJA EFEKTIF','HARI KERJA','JUMLAH HARI','HARI KERJA EFEKTIF'],
     tunjLeader:['TUNJANGAN LEADER','TUNJ LEADER','TUNJ LEADER','LEADER','TUNJANGAN DANRU LEMBUR','TUNJANGAN DANRU','DANRU'],
     backup:['BACK UP','BACKUP','TUNJANGAN BACKUP','TUNJ BACKUP','DANA BACK UP','DANA BACKUP'],
     lembur:['LEMBUR','UPAH LEMBUR','TUNJANGAN LEMBUR'],
@@ -1705,55 +1705,103 @@
     return n.some(x=>x && ALL_HEADER_KEYS.includes(x));
   }
 
-  function parseSheetToGroups(rows){
-    const PREFIX=/^PERINCIAN GAJI PEGAWAI\s*/i;
+  function cleanCell(v){
+    return String(v == null ? '' : v).replace(/\u00a0/g,' ').trim();
+  }
+
+  function looksLikeLocationRow(cells){
+    const joined = cells.map(cleanCell).filter(Boolean).join(' ').toUpperCase();
+    return /PERINCIAN\s+GAJI\s+PEGAWAI|WILAYAH\s+KERJA|LOKASI\s+KERJA|LOCATION\s*[:\-]/i.test(joined);
+  }
+
+  function extractLocation(cells, fallback){
+    const joined = cells.map(cleanCell).filter(Boolean).join(' ').trim();
+    const m = joined.match(/PERINCIAN\s+GAJI\s+PEGAWAI\s*[:\-]?\s*(.*)$/i);
+    if(m && m[1].trim()) return m[1].trim();
+    const m2 = joined.match(/(?:WILAYAH|LOKASI)\s+KERJA\s*[:\-]?\s*(.*)$/i);
+    if(m2 && m2[1].trim()) return m2[1].trim();
+    const m3 = joined.match(/LOCATION\s*[:\-]?\s*(.*)$/i);
+    if(m3 && m3[1].trim()) return m3[1].trim();
+    return fallback || 'UMUM';
+  }
+
+  function headerScore(row){
+    const n = row.map(normHeader);
+    return n.filter(x => x && ALL_HEADER_KEYS.includes(x)).length;
+  }
+
+  function parseSheetToGroups(rows, options){
+    options = options || {};
+    const fallbackLocation = options.location || 'UMUM';
     const groups=[];
-    let current=null, lastHeaderMap={};
+    let current=null;
+    let lastHeaderMap={};
     let readingHeader=false;
 
-    rows.forEach(r=>{
-      const cells=r.map(v=>String(v==null?'':v).trim());
-      const c0=cells[0]||'', c1=cells[1]||'', c2=cells[2]||'', c3=cells[3]||'';
+    const ensureCurrent = (location) => {
+      if(!current){
+        current={wilayah: location || fallbackLocation, rows:[], headerMap:Object.assign({},lastHeaderMap)};
+        groups.push(current);
+      }
+      return current;
+    };
 
-      if(c0&&!c1&&!c2&&!c3){
-        const wilayah=PREFIX.test(c0)?c0.replace(PREFIX,'').trim():c0;
-        current={wilayah,rows:[],headerMap:Object.assign({},lastHeaderMap)};
+    rows.forEach(raw=>{
+      const cells=(raw||[]).map(cleanCell);
+      while(cells.length && !cells[cells.length-1]) cells.pop();
+      if(!cells.length) return;
+
+      // Section/lokasi tetap dideteksi walaupun teksnya tidak hanya berada di kolom A.
+      if(looksLikeLocationRow(cells)){
+        current={
+          wilayah: extractLocation(cells, fallbackLocation),
+          rows:[],
+          headerMap:Object.assign({},lastHeaderMap)
+        };
         groups.push(current);
         readingHeader=false;
         return;
       }
+
+      const score=headerScore(cells);
+      const main=isMainHeaderRow(cells);
+      const detail=isHeaderDetailRow(cells);
+
+      // Banyak file rekap memiliki judul/merged-cell beberapa baris sebelum header.
+      // Jangan membuang baris header hanya karena ada baris judul di atasnya.
+      if(main || score >= 2){
+        ensureCurrent(fallbackLocation);
+        if(main || score >= 2){
+          if(main) current.headerMap={};
+          addHeaderCellsToMap(current.headerMap,cells);
+          lastHeaderMap=Object.assign({},current.headerMap);
+          readingHeader=true;
+          return;
+        }
+      }
+
       if(!current) return;
 
-      if(isMainHeaderRow(cells)){
-        current.headerMap={};
-        addHeaderCellsToMap(current.headerMap,cells);
-        lastHeaderMap=Object.assign({},current.headerMap);
-        readingHeader=true;
-        return;
-      }
-
-      // Google Sheets/Excel header ini bertingkat (baris 3, 4, 5).
-      // Gabungkan semua header detail sebelum baris data karyawan dimulai.
-      if(readingHeader && isHeaderDetailRow(cells) && isNaN(parseInt(c0,10))){
+      // Header bertingkat: gabungkan semua baris header sebelum data karyawan.
+      if(readingHeader && detail && isNaN(parseInt(cells[0]||'',10))){
         addHeaderCellsToMap(current.headerMap,cells);
         lastHeaderMap=Object.assign({},current.headerMap);
         return;
       }
 
-      const no=parseInt(c0,10);
+      const no=parseInt(cells[0],10);
       const nama=String(sheetValue(cells,current.headerMap,HEADER_ALIASES.nama,1)||'').trim();
       const jabatan=String(sheetValue(cells,current.headerMap,HEADER_ALIASES.jabatan,2)||'').trim();
 
-      if(!isNaN(no)&&no>0&&nama&&normHeader(nama)!=='JUMLAH'){
+      // Beberapa sheet memakai nomor urut di kolom A. Jika nama ditemukan,
+      // nomor urut tetap menjadi syarat agar baris subtotal/footer tidak masuk.
+      if(!isNaN(no)&&no>0&&nama&&normHeader(nama)!=='JUMLAH'&&normHeader(nama)!=='TOTAL'){
         readingHeader=false;
         current.rows.push({
           nama,jabatan,
           gajiPokok:parseIDNumber(sheetValue(cells,current.headerMap,HEADER_ALIASES.gajiPokok,3)),
-          // Sheet yang dikirim belum memiliki kolom JUMLAH HARI KERJA.
           hariKerja:parseIDNumber(sheetValue(cells,current.headerMap,HEADER_ALIASES.hariKerja,null)),
-          // Kolom E = Tunjangan Danru / Lembur, dipakai sebagai Tunj. Leader/Danru.
           tunjLeader:parseIDNumber(sheetValue(cells,current.headerMap,HEADER_ALIASES.tunjLeader,4)),
-          // Kolom L = Dana BackUp.
           backup:parseIDNumber(sheetValue(cells,current.headerMap,HEADER_ALIASES.backup,11)),
           lembur:parseIDNumber(sheetValue(cells,current.headerMap,HEADER_ALIASES.lembur,7)),
           tunjLain:parseIDNumber(sheetValue(cells,current.headerMap,HEADER_ALIASES.tunjLain,null)),
@@ -1769,7 +1817,13 @@
         });
       }
     });
-    return groups.filter(g=>g.rows.length);
+
+    // Jika tidak ada section lokasi, satu sheet tetap valid sebagai satu lokasi/sumber.
+    return groups.filter(g=>g.rows.length).map(g=>({
+      wilayah:g.wilayah || fallbackLocation,
+      rows:g.rows,
+      headerMap:g.headerMap
+    }));
   }
 
 
@@ -1819,7 +1873,7 @@
     const parsed = parseSheetLink(source.link);
     if(!parsed) throw new Error('Link Google Sheets tidak valid');
     return 'https://docs.google.com/spreadsheets/d/' + encodeURIComponent(parsed.id) +
-      '/gviz/tq?tqx=responseHandler:__SLIPGAJI_CB__&sheet=' + encodeURIComponent(sheetName);
+      '/gviz/tq?tqx=responseHandler:__SLIPGAJI_CB__&headers=0&sheet=' + encodeURIComponent(sheetName);
   }
 
   function fetchGvizRows(source, sheetName){
@@ -1839,14 +1893,14 @@
         cleanup();
         try{
           if(!data || !data.table) throw new Error('Format respons Google Sheets tidak dikenali');
-          const cols = (data.table.cols || []).map(c => c && (c.label || c.id || ''));
           const rows = (data.table.rows || []).map(r => (r.c || []).map(c => {
             if(!c) return '';
             if(c.f != null) return c.f;
             if(c.v == null) return '';
             return c.v;
           }));
-          resolve([cols].concat(rows));
+          // headers=0 membuat baris judul/header asli tetap ikut terkirim.
+          resolve(rows);
         }catch(e){ reject(e); }
       };
       script.onerror = function(){ cleanup(); reject(new Error('Google Sheets tidak dapat diakses. Pastikan spreadsheet dapat dilihat melalui link.')); };
@@ -1874,7 +1928,10 @@
     // Coba beberapa tahun agar sheet seperti JANUARI 2025 tetap terbaca
     // walaupun tahun aktif di website sudah 2026.
     const baseYear = parseInt(yearHint,10) || new Date().getFullYear();
-    const years = [baseYear-2, baseYear-1, baseYear, baseYear+1, baseYear+2];
+    // Cari beberapa tahun di sekitar periode aktif agar JANUARI 2025,
+    // JANUARI 2026, dst. tidak gagal hanya karena tahun website berbeda.
+    const years = [];
+    for(let y=baseYear-3; y<=baseYear+3; y++) years.push(y);
     const candidates = [];
     years.forEach(y=>{
       candidates.push(monthName + ' ' + y);
@@ -1886,7 +1943,7 @@
     for(const sheetName of uniqueCandidates){
       try{
         const rows = await fetchGvizRows(src, sheetName);
-        const groups = parseSheetToGroups(rows);
+        const groups = parseSheetToGroups(rows, {location: src.name || 'UMUM'});
         if(groups.length) return { sheetName, groups };
       }catch(e){ lastErr=e; }
     }
@@ -1964,7 +2021,7 @@
     const text = $('pasteArea').value;
     if(!text.trim()){ toast('Tempel datanya dulu ke kotak di atas'); return; }
     const rows = pastedTextToRows(text);
-    const groups = parseSheetToGroups(rows);
+    const groups = parseSheetToGroups(rows, {location: src.name || 'UMUM'});
     if(!groups.length){
       toast('Tidak ada baris karyawan yang terbaca. Pastikan Anda menyalin mulai dari baris "PERINCIAN GAJI PEGAWAI..." sampai baris data karyawan terakhir.');
       return;
@@ -2046,7 +2103,9 @@
             saveCurrentIntoArchive();
             monthRecords[key].sources = clone(rekapSources);
             ok++; addedTotal += added;
-          }catch(e){}
+          }catch(e){
+            console.warn('Gagal membaca', src.name, monthName, e);
+          }
         }
         if(prev && monthRecords[prev]) loadMonthFromArchive(prev);
         src.updatedAt = new Date().toISOString().slice(0,10);
