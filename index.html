@@ -1021,6 +1021,10 @@
       if(res3 && res3.value) monthRecords = JSON.parse(res3.value) || {};
     }catch(e){ monthRecords = {}; }
 
+    // Bersihkan arsip tahun lama yang tersimpan dari versi sebelumnya.
+    // Sistem periode aktif PT Ray Mitra Perkasa sekarang hanya 2026.
+    // Arsip tahun mengikuti nama tab Google Sheets; jangan menghapus tahun lain seperti 2025.
+
     // Migrasi otomatis data versi lama menjadi arsip AGUSTUS 2026/periode lama.
     if(!Object.keys(monthRecords).length){
       let oldSources = [];
@@ -1076,55 +1080,54 @@
 
   async function clearActiveMonth(){
     const key = activeMonthKey || meta.periode || '';
-    if(!key){
-      toast('Belum ada bulan aktif');
-      return;
-    }
+    if(!key){ toast('Belum ada bulan aktif'); return; }
 
     const total = Array.isArray(employees) ? employees.length : 0;
-    if(total === 0){
-      toast('Bulan ' + key + ' sudah kosong');
-      return;
-    }
-
-    // Konfirmasi dua tahap agar tombol berbahaya tidak terpencet tanpa sengaja.
     const first = confirm(
-      'HAPUS SEMUA DATA BULAN\n\n' +
+      'HAPUS SEMUA + FOLDER/ARSIP BULAN\n\n' +
       key + '\n' +
       'Jumlah slip: ' + total + '\n\n' +
-      'Semua data karyawan/slip pada bulan ini akan dihapus.\n' +
-      'Link sumber rekap tetap disimpan agar Anda bisa sinkron ulang.\n\n' +
+      'Data karyawan DAN folder/arsip bulan ini akan dihapus permanen.\n' +
+      'Link Rekap Gaji utama tetap dipertahankan.\n\n' +
       'Lanjutkan?'
     );
     if(!first) return;
 
-    const second = prompt('Ketik HAPUS untuk mengonfirmasi penghapusan ' + total + ' data pada ' + key + ':');
+    const second = prompt('Ketik HAPUS untuk menghapus data dan folder/arsip ' + key + ':');
     if(String(second || '').trim().toUpperCase() !== 'HAPUS'){
-      toast('Penghapusan dibatalkan');
-      return;
+      toast('Penghapusan dibatalkan'); return;
     }
 
-    employees = [];
-    currentId = null;
-    wilayahFilter = '__all__';
-    employeeSearch = '';
-    if($('employeeSearch')) $('employeeSearch').value = '';
-
-    // Tetap pertahankan bulan, metadata, dan link sumber agar sinkronisasi berikutnya mudah.
-    if(!monthRecords[key]) ensureMonthRecord(key);
-    monthRecords[key].employees = [];
-    monthRecords[key].meta = clone(Object.assign({}, meta, {periode:key}));
-    monthRecords[key].sources = clone(rekapSources || []);
-
     try{
-      await storageSet(STORAGE_KEY, JSON.stringify([]));
+      // Hapus seluruh record bulan: data + folder/arsip bulan.
+      delete monthRecords[key];
+      employees = [];
+      currentId = null;
+      wilayahFilter = '__all__';
+      employeeSearch = '';
+      if($('employeeSearch')) $('employeeSearch').value = '';
+
+      // Pilih arsip 2026 lain jika masih ada. Jika tidak, buat bulan kosong 2026.
+      const remaining = Object.keys(monthRecords).filter(k => /20\d{2}/.test(k));
+      remaining.sort(compareMonthKeys);
+      activeMonthKey = remaining[0] || '';
+      if(activeMonthKey){
+        loadMonthFromArchive(activeMonthKey);
+      } else {
+        const fresh = 'JANUARI 2026';
+        ensureMonthRecord(fresh, {employees:[], meta:{periode:fresh, hrdName:meta.hrdName || '', printLayout:printLayout}, sources:rekapSources});
+        loadMonthFromArchive(fresh);
+      }
+
+      await storageSet(STORAGE_KEY, JSON.stringify(employees));
       await persistArchive();
+      await saveSources();
       setSaveStatus(true);
       renderAll();
-      toast('Semua data bulan ' + key + ' berhasil dihapus');
+      toast('Data dan folder/arsip ' + key + ' berhasil dihapus');
     }catch(err){
-      console.error('Gagal menghapus data bulan', err);
-      toast('Gagal menghapus data bulan. Silakan coba lagi.');
+      console.error('Gagal menghapus bulan:', err);
+      toast('Gagal menghapus bulan. Silakan coba lagi.');
     }
   }
 
@@ -1174,13 +1177,20 @@
   }
 
   // ===== rendering: arsip bulanan =====
+  const MONTH_ORDER = {JANUARI:1,FEBRUARI:2,MARET:3,APRIL:4,MEI:5,JUNI:6,JULI:7,AGUSTUS:8,SEPTEMBER:9,OKTOBER:10,NOVEMBER:11,DESEMBER:12};
+  function parseMonthKeyParts(key){
+    const m=String(key||'').trim().toUpperCase().match(/^(JANUARI|FEBRUARI|MARET|APRIL|MEI|JUNI|JULI|AGUSTUS|SEPTEMBER|OKTOBER|NOVEMBER|DESEMBER)(?:\s+(20\d{2}))?$/);
+    return m ? {month:m[1],year:parseInt(m[2]||'2026',10)} : {month:'',year:0};
+  }
+  function compareMonthKeys(a,b){
+    const A=parseMonthKeyParts(a), B=parseMonthKeyParts(b);
+    if(A.year!==B.year) return B.year-A.year;
+    return (B.month?MONTH_ORDER[B.month]:0)-(A.month?MONTH_ORDER[A.month]:0);
+  }
   function renderMonthSelector(){
     const sel = $('monthSelect');
     if(!sel) return;
-    const keys = Object.keys(monthRecords).sort((a,b)=>{
-      const pa = Date.parse('1 ' + a), pb = Date.parse('1 ' + b);
-      return (isNaN(pb)?0:pb) - (isNaN(pa)?0:pa) || b.localeCompare(a);
-    });
+    const keys = Object.keys(monthRecords).sort(compareMonthKeys);
     if(activeMonthKey && !keys.includes(activeMonthKey)) keys.unshift(activeMonthKey);
     sel.innerHTML = keys.map(k=>{
       const rec = monthRecords[k] || {};
@@ -1986,24 +1996,28 @@ function headerScore(row){
   }
 
   function monthNameToKey(sheetName, yearHint){
-    const month=normalizeMonthTabName(sheetName);
+    const raw=String(sheetName||'').trim().toUpperCase();
+    const month=normalizeMonthTabName(raw);
     if(!month) return '';
-    const ym=String(sheetName||'').match(/20\d{2}/);
-    const year=ym ? ym[0] : (String(yearHint||'').match(/20\d{2}/)||[])[0] || '';
-    return year ? month+' '+year : month;
+    // PENTING: jika nama tab berisi tahun, tahun tersebut adalah periode resmi.
+    // Contoh: DESEMBER 2025 -> DESEMBER 2025 (tidak boleh diubah menjadi 2026).
+    const ym=raw.match(/20\d{2}/);
+    const year=ym ? ym[0] : String(yearHint||'2026');
+    return month+' '+year;
   }
 
   function currentYearHint(){
-    const m=String(activeMonthKey||meta.periode||'').match(/20\d{2}/);
-    return m ? m[0] : String(new Date().getFullYear());
+    const m=String(activeMonthKey||'').match(/20\d{2}/);
+    return m ? m[0] : '2026';
   }
 
   function buildMonthCandidates(monthName, yearHint){
     const base=String(monthName||'').toUpperCase();
     const monthNo=MONTH_SHEET_NAMES.indexOf(base)+1;
-    const years=[];
-    const active=parseInt(yearHint,10)||new Date().getFullYear();
-    for(let y=active-3;y<=active+3;y++) years.push(y);
+    // Karena GitHub Pages tidak bisa meminta daftar nama tab Google Sheets,
+    // kita mencoba tahun yang lazim dipakai di arsip. Jika tab mengandung tahun,
+    // monthNameToKey() tetap mengambil TAHUN PERSIS dari nama tab tersebut.
+    const years=['2025','2026','2027'];
     const out=[];
     const add=v=>{if(v && !out.includes(v)) out.push(v);};
     // Nama tab paling umum, termasuk variasi yang sering dipakai di rekap gaji.
@@ -2098,7 +2112,7 @@ function headerScore(row){
       if(sourceHadData){src.updatedAt=new Date().toISOString().slice(0,10);totalSources++;}
     }
 
-    const returnKey=originalMonth&&monthRecords[originalMonth]?originalMonth:Object.keys(monthRecords).sort().reverse()[0];
+    const returnKey=originalMonth&&monthRecords[originalMonth]?originalMonth:Object.keys(monthRecords).sort(compareMonthKeys).reverse()[0];
     if(returnKey) loadMonthFromArchive(returnKey);
     await persistArchive(); await saveSources(); renderAll();
 
